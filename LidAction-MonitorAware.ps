@@ -1,12 +1,11 @@
-#Requires -RunAsAdministrator
 <#
 .SYNOPSIS
     Automatically switches the laptop lid close action
     based on whether an external monitor is connected.
 
 .DESCRIPTION
-    - External monitor connected  -> lid close = "Do nothing"
-    - No external monitor         -> lid close = "Sleep"
+    - External monitor connected  -> lid close = "Do nothing", auto-lock disabled
+    - No external monitor         -> lid close = "Sleep", auto-lock enabled
 
     Runs in the background and polls for display changes
     via WMI every 5 seconds.
@@ -17,58 +16,62 @@
 #>
 
 # -- powercfg constants ---------------------------------------------------
-$LidSubgroup = '4f971e89-eebd-4455-a8de-9e59040e7347'
-$LidSetting  = '5ca83367-6e45-459f-a27b-476b1d01c936'
-# 0 = Do nothing, 1 = Sleep, 2 = Hibernate, 3 = Shut down
+$LidSubgroup    = '4f971e89-eebd-4455-a8de-9e59040e7347'
+$LidSetting     = '5ca83367-6e45-459f-a27b-476b1d01c936'
+# Console lock on display off: SUB_NONE \ CONSOLELOCK
+$ConsoleLockGuid = '0e796bdb-100d-47d6-a2d5-f7d2daa51f51'
+$SubNone         = 'fea3413e-7e05-4911-9a71-700331f1c294'
+
+# 0 = Do nothing, 1 = Sleep
 $ActionDoNothing = 0
 $ActionSleep     = 1
 
 # -- Functions -------------------------------------------------------------
 
 function Get-ExternalMonitorCount {
-    <#
-    .SYNOPSIS
-        Returns the number of active external monitors.
-        Counts all active displays via WmiMonitorBasicDisplayParams
-        and subtracts 1 for the built-in laptop screen.
-    #>
-    $monitors = Get-CimInstance -Namespace root\wmi -ClassName WmiMonitorID -ErrorAction SilentlyContinue
     $active = Get-CimInstance -Namespace root\wmi -ClassName WmiMonitorBasicDisplayParams -ErrorAction SilentlyContinue
-
-    # Active monitor count minus the built-in display
-    $count = if ($active) { ($active | Measure-Object).Count - 1 } else { 0 }
+    $count = if ($active) { @($active).Count - 1 } else { 0 }
     if ($count -lt 0) { $count = 0 }
     return $count
 }
 
 function Set-LidCloseAction {
-    param(
-        [ValidateSet(0, 1, 2, 3)]
-        [int]$Action
-    )
-    $labels = @{ 0 = 'Do nothing'; 1 = 'Sleep'; 2 = 'Hibernate'; 3 = 'Shut down' }
+    param([int]$Action)
+    $labels = @{ 0 = 'Do nothing'; 1 = 'Sleep' }
 
-    # Set for both AC (plugged in) and DC (battery) power
-    powercfg /SETACVALUEINDEX SCHEME_CURRENT $LidSubgroup $LidSetting $Action | Out-Null
-    powercfg /SETDCVALUEINDEX SCHEME_CURRENT $LidSubgroup $LidSetting $Action | Out-Null
-    powercfg /SETACTIVE SCHEME_CURRENT | Out-Null
+    powercfg /SETACVALUEINDEX SCHEME_CURRENT $LidSubgroup $LidSetting $Action 2>$null
+    powercfg /SETDCVALUEINDEX SCHEME_CURRENT $LidSubgroup $LidSetting $Action 2>$null
+    powercfg /SETACTIVE SCHEME_CURRENT 2>$null
 
     Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Lid close action: $($labels[$Action])" -ForegroundColor Cyan
 }
 
+function Set-ConsoleLock {
+    param([int]$Lock) # 0 = don't lock, 1 = lock
+    $labels = @{ 0 = 'OFF (no lock on lid close)'; 1 = 'ON (lock on lid close)' }
+
+    powercfg /SETACVALUEINDEX SCHEME_CURRENT $SubNone $ConsoleLockGuid $Lock 2>$null
+    powercfg /SETDCVALUEINDEX SCHEME_CURRENT $SubNone $ConsoleLockGuid $Lock 2>$null
+    powercfg /SETACTIVE SCHEME_CURRENT 2>$null
+
+    Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Console lock: $($labels[$Lock])" -ForegroundColor Cyan
+}
+
 # -- Initial check ---------------------------------------------------------
 
-Write-Host '══════════════════════════════════════════════════════════' -ForegroundColor DarkGray
-Write-Host '  monitor-lid-guard  —  Press Ctrl+C to stop'             -ForegroundColor Yellow
-Write-Host '══════════════════════════════════════════════════════════' -ForegroundColor DarkGray
+Write-Host '==========================================================' -ForegroundColor DarkGray
+Write-Host '  monitor-lid-guard  --  Press Ctrl+C to stop'              -ForegroundColor Yellow
+Write-Host '==========================================================' -ForegroundColor DarkGray
 
 $extCount = Get-ExternalMonitorCount
 Write-Host "[$(Get-Date -Format 'HH:mm:ss')] External monitors: $extCount"
 
 if ($extCount -gt 0) {
     Set-LidCloseAction -Action $ActionDoNothing
+    Set-ConsoleLock -Lock 0
 } else {
     Set-LidCloseAction -Action $ActionSleep
+    Set-ConsoleLock -Lock 1
 }
 
 $lastState = ($extCount -gt 0)
@@ -86,20 +89,26 @@ try {
 
         if ($hasExternal -ne $lastState) {
             Write-Host ''
-            Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Change detected — external monitors: $extCount" -ForegroundColor Green
+            Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Change detected - external monitors: $extCount" -ForegroundColor Green
 
             if ($hasExternal) {
                 Set-LidCloseAction -Action $ActionDoNothing
+                Set-ConsoleLock -Lock 0
             } else {
                 Set-LidCloseAction -Action $ActionSleep
+                Set-ConsoleLock -Lock 1
             }
 
             $lastState = $hasExternal
         }
     }
-} finally {
-    # On exit — restore "Sleep" as a safe default
+}
+catch {
+    Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Error: $_" -ForegroundColor Red
+}
+finally {
     Write-Host ''
-    Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Exiting. Restoring lid close action: Sleep" -ForegroundColor Yellow
+    Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Exiting. Restoring defaults..." -ForegroundColor Yellow
     Set-LidCloseAction -Action $ActionSleep
+    Set-ConsoleLock -Lock 1
 }
