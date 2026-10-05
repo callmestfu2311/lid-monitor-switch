@@ -2,113 +2,47 @@
 .SYNOPSIS
     Automatically switches the laptop lid close action
     based on whether an external monitor is connected.
-
 .DESCRIPTION
     - External monitor connected  -> lid close = "Do nothing", auto-lock disabled
     - No external monitor         -> lid close = "Sleep", auto-lock enabled
-
     Runs in the background and polls for display changes
     via WMI every 5 seconds.
-
-.NOTES
-    Must be run as Administrator (powercfg requires elevated privileges).
-    To stop: close the PowerShell window or press Ctrl+C.
 #>
-
+$LogPath = "C:\Users\digma\.gemini\antigravity\scratch\lid-guard.log"
+function Write-Log {
+    param([string]$Message)
+    $timestamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+    $line = "[$timestamp] $Message"
+    Write-Host $line
+    try {
+        Add-Content -Path $LogPath -Value $line -ErrorAction SilentlyContinue
+    } catch {}
+}
 # -- powercfg constants ---------------------------------------------------
-$LidSubgroup    = '4f971e89-eebd-4455-a8de-9e59040e7347'
-$LidSetting     = '5ca83367-6e45-459f-a27b-476b1d01c936'
-# Console lock on display off: SUB_NONE \ CONSOLELOCK
+$LidSubgroup     = '4f971e89-eebd-4455-a8de-9e59040e7347'
+$LidSetting      = '5ca83367-6e45-459f-a27b-476b1d01c936'
 $ConsoleLockGuid = '0e796bdb-100d-47d6-a2d5-f7d2daa51f51'
 $SubNone         = 'fea3413e-7e05-4911-9a71-700331f1c294'
-
-# 0 = Do nothing, 1 = Sleep
 $ActionDoNothing = 0
 $ActionSleep     = 1
-
 # -- Functions -------------------------------------------------------------
-
-function Get-ExternalMonitorCount {
-    $active = Get-CimInstance -Namespace root\wmi -ClassName WmiMonitorBasicDisplayParams -ErrorAction SilentlyContinue
-    $count = if ($active) { @($active).Count - 1 } else { 0 }
-    if ($count -lt 0) { $count = 0 }
-    return $count
-}
-
-function Set-LidCloseAction {
-    param([int]$Action)
-    $labels = @{ 0 = 'Do nothing'; 1 = 'Sleep' }
-
-    powercfg /SETACVALUEINDEX SCHEME_CURRENT $LidSubgroup $LidSetting $Action 2>$null
-    powercfg /SETDCVALUEINDEX SCHEME_CURRENT $LidSubgroup $LidSetting $Action 2>$null
-    powercfg /SETACTIVE SCHEME_CURRENT 2>$null
-
-    Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Lid close action: $($labels[$Action])" -ForegroundColor Cyan
-}
-
-function Set-ConsoleLock {
-    param([int]$Lock) # 0 = don't lock, 1 = lock
-    $labels = @{ 0 = 'OFF (no lock on lid close)'; 1 = 'ON (lock on lid close)' }
-
-    powercfg /SETACVALUEINDEX SCHEME_CURRENT $SubNone $ConsoleLockGuid $Lock 2>$null
-    powercfg /SETDCVALUEINDEX SCHEME_CURRENT $SubNone $ConsoleLockGuid $Lock 2>$null
-    powercfg /SETACTIVE SCHEME_CURRENT 2>$null
-
-    Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Console lock: $($labels[$Lock])" -ForegroundColor Cyan
-}
-
-# -- Initial check ---------------------------------------------------------
-
-Write-Host '==========================================================' -ForegroundColor DarkGray
-Write-Host '  monitor-lid-guard  --  Press Ctrl+C to stop'              -ForegroundColor Yellow
-Write-Host '==========================================================' -ForegroundColor DarkGray
-
-$extCount = Get-ExternalMonitorCount
-Write-Host "[$(Get-Date -Format 'HH:mm:ss')] External monitors: $extCount"
-
-if ($extCount -gt 0) {
-    Set-LidCloseAction -Action $ActionDoNothing
-    Set-ConsoleLock -Lock 0
-} else {
-    Set-LidCloseAction -Action $ActionSleep
-    Set-ConsoleLock -Lock 1
-}
-
-$lastState = ($extCount -gt 0)
-
-# -- Main loop (poll every 5 sec) -----------------------------------------
-
-Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Watching for changes..." -ForegroundColor DarkGray
-
-try {
-    while ($true) {
-        Start-Sleep -Seconds 5
-
-        $extCount    = Get-ExternalMonitorCount
-        $hasExternal = ($extCount -gt 0)
-
-        if ($hasExternal -ne $lastState) {
-            Write-Host ''
-            Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Change detected - external monitors: $extCount" -ForegroundColor Green
-
-            if ($hasExternal) {
-                Set-LidCloseAction -Action $ActionDoNothing
-                Set-ConsoleLock -Lock 0
-            } else {
-                Set-LidCloseAction -Action $ActionSleep
-                Set-ConsoleLock -Lock 1
+function Has-ExternalMonitor {
+    try {
+        $connParams = Get-CimInstance -Namespace root\wmi -ClassName WmiMonitorConnectionParams -ErrorAction SilentlyContinue
+        if ($connParams) {
+            # 2147483648 (0x80000000 = Internal panel), 11 = DisplayPort Embedded (eDP)
+            $external = @($connParams | Where-Object { $_.Active -and ($_.VideoOutputTechnology -ne 2147483648) -and ($_.VideoOutputTechnology -ne 11) })
+            if ($external.Count -gt 0) {
+                return $true
             }
-
-            $lastState = $hasExternal
         }
+        # Fallback check via WmiMonitorID if ConnectionParams unavailable
+        $ids = Get-CimInstance -Namespace root\wmi -ClassName WmiMonitorID -ErrorAction SilentlyContinue
+        if ($ids) {
+            $extIds = @($ids | Where-Object { $_.InstanceName -notmatch 'BOE|INTERNAL|eDP' })
+            return ($extIds.Count -gt 0)
+        }
+    } catch {
+        Write-Log "Error checking monitors: $_"
     }
-}
-catch {
-    Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Error: $_" -ForegroundColor Red
-}
-finally {
-    Write-Host ''
-    Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Exiting. Restoring defaults..." -ForegroundColor Yellow
-    Set-LidCloseAction -Action $ActionSleep
-    Set-ConsoleLock -Lock 1
-}
+    return $false
