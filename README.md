@@ -32,7 +32,7 @@
 ### 1. Download the script
 
 ```powershell
-git clone https://github.com/YOUR_USERNAME/monitor-lid-guard.git
+git clone https://github.com/YOUR_USERNAME/lid-monitor-switch.git
 ```
 
 Or just download [`LidAction-MonitorAware.ps1`](LidAction-MonitorAware.ps1) directly.
@@ -91,7 +91,7 @@ Example output:
 
 ```
 ==========================================================
-  monitor-lid-guard  --  Press Ctrl+C to stop
+  lid-monitor-switch  --  Press Ctrl+C to stop
 ==========================================================
 [21:58:30] External monitors: 1
 [21:58:30] Lid close action: Do nothing
